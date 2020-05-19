@@ -1129,6 +1129,7 @@ SEXP pall(SEXP x, SEXP narmArg) {
             if (outp[i] == NA_INTEGER) {
               outp[i] = 1;
             }
+            continue;
           }
           continue;
         }
@@ -1155,6 +1156,7 @@ SEXP pall(SEXP x, SEXP narmArg) {
             if (outp[i] == NA_INTEGER) {
               outp[i] = 1;
             }
+            continue;
           }
           continue;
         }
@@ -1308,6 +1310,360 @@ SEXP pall(SEXP x, SEXP narmArg) {
       default:
         error(_("Internal error: should have caught non-INTSXP/REALSXP input by now")); // # nocov
       }
+    }
+  }
+
+  UNPROTECT(1);
+  return out;
+}
+
+SEXP ptest(SEXP x, SEXP narmArg) {
+  if (!isNewList(x))
+    error(_("Internal error: x must be a list")); // # nocov
+
+  SEXP xj;
+  int J=LENGTH(x);
+  if (J == 0) {
+    error(_("Empty input"));
+  } else if (J == 1) {
+    xj = VECTOR_ELT(x, 0);
+    if (TYPEOF(xj) == VECSXP) { // e.g. psum(.SD)
+      return psum(xj, narmArg);
+    } else {
+      // na.rm doesn't matter -- input --> output
+      return xj;
+    }
+  }
+
+  if (!isLogical(narmArg) || LENGTH(narmArg)!=1 || LOGICAL(narmArg)[0]==NA_LOGICAL)
+    error(_("na.rm must be TRUE or FALSE"));
+
+  SEXPTYPE outtype = INTSXP;
+  int n = -1, nj, xi;
+  for (int j=0; j<J; j++) {
+    xj = VECTOR_ELT(x, j);
+    switch(TYPEOF(xj)) {
+    case LGLSXP: case INTSXP:
+      if (isFactor(xj)) {
+        error(_("%s not meaningful for factors"), "psum");
+      }
+      break;
+    case REALSXP:
+      if (INHERITS(xj, char_integer64)) {
+        error(_("integer64 input not supported"));
+      }
+      if (outtype == INTSXP) { // bump if this is the first numeric we've seen
+        outtype = REALSXP;
+      }
+      break;
+    case CPLXSXP:
+      if (outtype != CPLXSXP) { // only bump if we're not already complex
+        outtype = CPLXSXP;
+      }
+      break;
+    default:
+      error(_("Only logical, numeric and complex inputs are supported for %s"), "psum");
+    }
+    if (n >= 0) {
+      nj = LENGTH(xj);
+      if (n == 1 && nj > 1) {
+        n = nj; // singleton comes first, vector comes later [psum(1, 1:4)]
+      } else if (nj != 1 && nj != n) {
+        error(_("Inconsistent input lengths -- first found %d, but %d element has length %d. Only singletons will be recycled."), n, j+1, nj);
+      }
+    } else { // initialize
+      n = LENGTH(xj);
+    }
+  }
+
+  SEXP out = PROTECT(allocVector(outtype, n));
+  if (n == 0) {
+    UNPROTECT(1);
+    return(out);
+  }
+  if (LOGICAL(narmArg)[0]) {
+    switch (outtype) {
+    case INTSXP: {
+      int *outp = INTEGER(out), *xjp;
+      for (int i=0; i<n; i++) {
+        int j = 0;
+        // speed through columns until find non-missing
+        while (j < J) {
+          xj = VECTOR_ELT(x, j++);
+          xjp = INTEGER(xj); // INTEGER is the same as LOGICAL
+          nj = LENGTH(xj);
+          xi = nj == 1 ? 0 : i; // recycling for singletons
+          if (xjp[xi] != NA_INTEGER) {
+            outp[i] = xjp[xi]; // initialize
+            break;
+          }
+        }
+        if (j == J && xjp[xi] == NA_INTEGER) { // default
+          outp[i] = NA_INTEGER;
+          break;
+        }
+        for ( ; j<J; j++) {
+          xj = VECTOR_ELT(x, j);
+          xjp = INTEGER(xj);
+          nj = LENGTH(xj);
+          xi = nj == 1 ? 0 : i;
+          if (xjp[xi] == NA_INTEGER)
+            continue;
+          if ((xjp[xi] > 0 && INT_MAX - xjp[xi] < outp[i]) ||
+              (xjp[xi] < 0 && INT_MIN - xjp[xi] > outp[i])) { // overflow
+            outp[i] = NA_INTEGER;
+            warning(_("Inputs have exceeded .Machine$integer.max=%d in absolute value; returning NA. Please cast to numeric first to avoid this."), INT_MAX);
+            break;
+          }
+          outp[i] += xjp[xi];
+        }
+      }
+    } break;
+    case REALSXP: { // REALSXP; special handling depending on whether each input is int/numeric
+      double *outp = REAL(out), *xjp; // since outtype is REALSXP, there's at least one REAL column
+      for (int i=0; i<n; i++) {
+        int j=0, initialized=0;
+        // speed through columns until find non-missing
+        while (j < J && !initialized) {
+          xj = VECTOR_ELT(x, j++);
+          nj = LENGTH(xj);
+          xi = nj == 1 ? 0 : i;
+          switch(TYPEOF(xj)) {
+          case LGLSXP: case INTSXP: {
+            int *xjp = INTEGER(xj);
+            if (xjp[xi] != NA_INTEGER) {
+              initialized = 1;
+              outp[i] = (double)xjp[xi]; // initialize
+              break;
+            }
+          } break;
+          case REALSXP: {
+            xjp = REAL(xj);
+            if (!ISNAN(xjp[xi])) {
+              initialized = 1;
+              outp[i] = xjp[xi]; // initialize
+              break;
+            }
+          } break;
+          default:
+            error(_("Internal error: should have caught invalid input by now")); // # nocov
+          }
+        }
+        if (j == J && !initialized) {
+          outp[i] = NA_REAL;
+          break;
+        }
+        for ( ; j<J; j++) {
+          xj = VECTOR_ELT(x, j);
+          nj = LENGTH(xj);
+          xi = nj == 1 ? 0 : i;
+          switch (TYPEOF(xj)) {
+          case LGLSXP: case INTSXP: {
+            int *xjp = INTEGER(xj);
+            if (xjp[xi] == NA_INTEGER)
+              continue;
+            outp[i] += xjp[xi];
+          } break;
+          case REALSXP: {
+            xjp = REAL(xj);
+            if (ISNAN(xjp[xi]))
+              continue;
+            outp[i] += xjp[xi];
+          } break;
+          default:
+            error(_("Internal error: should have caught invalid input by now")); // # nocov
+          }
+        }
+      }
+    } break;
+    case CPLXSXP: {
+      Rcomplex *outp = COMPLEX(out), *xjp;
+      for (int i=0; i<n; i++) {
+        int j=0, initialized=0;
+        // speed through columns until find non-missing
+        while (j < J && !initialized) {
+          xj = VECTOR_ELT(x, j++);
+          nj = LENGTH(xj);
+          xi = nj == 1 ? 0 : i;
+          switch(TYPEOF(xj)) {
+          case LGLSXP: case INTSXP: {
+            int *xjp = INTEGER(xj);
+            if (xjp[xi] != NA_INTEGER) {
+              initialized = 1;
+              outp[i].r = (double)xjp[xi]; // initialize
+              outp[i].i = 0;
+              break;
+            }
+          } break;
+          case REALSXP: {
+            double *xjp = REAL(xj);
+            if (!ISNAN(xjp[xi])) {
+              initialized = 1;
+              outp[i].r = xjp[xi]; // initialize
+              outp[i].i = 0;
+              break;
+            }
+          } break;
+          case CPLXSXP: {
+            xjp = COMPLEX(xj);
+            if (!ISNAN_COMPLEX(xjp[xi])) {
+              initialized = 1;
+              outp[i].r = xjp[xi].r;
+              outp[i].i = xjp[xi].i;
+            }
+          } break;
+          default:
+            error(_("Internal error: should have caught invalid input by now")); // # nocov
+          }
+        }
+        if (j == J && !initialized) { // default
+          outp[i] = NA_CPLX;
+          break;
+        }
+        for ( ; j<J; j++) {
+          xj = VECTOR_ELT(x, j);
+          nj = LENGTH(xj);
+          xi = nj == 1 ? 0 : i;
+          switch (TYPEOF(xj)) {
+          case LGLSXP: case INTSXP: {
+            int *xjp = INTEGER(xj);
+            if (xjp[xi] == NA_INTEGER)
+              continue;
+            outp[i].r += xjp[xi];
+          } break;
+          case REALSXP: {
+            double *xjp = REAL(xj);
+            if (ISNAN(xjp[xi]))
+              continue;
+            outp[i].r += xjp[xi];
+          } break;
+          case CPLXSXP: {
+            xjp = COMPLEX(xj);
+            if (ISNAN_COMPLEX(xjp[xi]))
+              continue;
+            outp[i].r += xjp[xi].r;
+            outp[i].i += xjp[xi].i;
+          } break;
+          default:
+            error(_("Internal error: should have caught invalid input by now")); // # nocov
+          }
+        }
+      }
+    } break;
+    default:
+      error(_("Internal error: should have caught non-INTSXP/REALSXP input by now")); // # nocov
+    }
+  } else { // na.rm=FALSE
+    switch (outtype) {
+    case INTSXP: {
+      int *outp = INTEGER(out), *xjp;
+      int sum;
+      for (int i=0; i<n; i++) {
+        sum = 0;
+        for (int j=0; j<J; j++) {
+          xj = VECTOR_ELT(x, j);
+          nj = LENGTH(xj);
+          xjp = INTEGER(xj);
+          xi = nj == 1 ? 0 : i;
+          if (xjp[xi] == NA_INTEGER) {
+            sum = NA_INTEGER;
+            break;
+          }
+          if ((xjp[xi] > 0 && INT_MAX - xjp[xi] < sum) ||
+              (xjp[xi] < 0 && INT_MIN - xjp[xi] > sum)) {
+            warning(_("Inputs have exceeded .Machine$integer.max=%d in absolute value; returning NA. Please cast to numeric first to avoid this."), INT_MAX);
+            sum = NA_INTEGER;
+            break;
+          }
+          sum += xjp[xi];
+        }
+        outp[i] = sum;
+      }
+    } break;
+    case REALSXP: {
+      double *outp = REAL(out), *xjp;
+      double sum;
+      for (int i=0; i<n; i++) {
+        sum = 0;
+        int j = 0, is_na = 0;
+        while (j < J && !is_na) {
+          xj = VECTOR_ELT(x, j++);
+          nj = LENGTH(xj);
+          xi = nj == 1 ? 0 : i;
+          switch (TYPEOF(xj)) {
+          case LGLSXP: case INTSXP: {
+            int *xjp = INTEGER(xj);
+            if (xjp[xi] == NA_INTEGER) {
+              is_na = 1;
+              break;
+            }
+            sum += xjp[xi];
+          } break;
+          case REALSXP: {
+            xjp = REAL(xj);
+            if (ISNAN(xjp[xi])) {
+              is_na = 1;
+              break;
+            }
+            sum += xjp[xi];
+          } break;
+          default:
+            error(_("Internal error: should have caught non-INTSXP/REALSXP input by now")); // # nocov
+          }
+        }
+        outp[i] = is_na ? NA_REAL : sum;
+      }
+    } break;
+    case CPLXSXP: {
+      Rcomplex *outp = COMPLEX(out), *xjp;
+      double rsum, isum;
+      for (int i=0; i<n; i++) {
+        rsum = isum = 0;
+        int j = 0, is_na = 0;
+        while (j < J && !is_na) {
+          xj = VECTOR_ELT(x, j++);
+          nj = LENGTH(xj);
+          xi = nj == 1 ? 0 : i;
+          switch (TYPEOF(xj)) {
+          case LGLSXP: case INTSXP: {
+            int *xjp = INTEGER(xj);
+            if (xjp[xi] == NA_INTEGER) {
+              is_na = 1;
+              break;
+            }
+            rsum += xjp[xi];
+          } break;
+          case REALSXP: {
+            double *xjp = REAL(xj);
+            if (ISNAN(xjp[xi])) {
+              is_na = 1;
+              break;
+            }
+            rsum += xjp[xi];
+          } break;
+          case CPLXSXP: {
+            xjp = COMPLEX(xj);
+            if (ISNAN_COMPLEX(xjp[xi])) {
+              is_na = 1;
+              break;
+            }
+            rsum += xjp[xi].r;
+            isum += xjp[xi].i;
+          } break;
+          default:
+            error(_("Internal error: should have caught non-INTSXP/REALSXP input by now")); // # nocov
+          }
+        }
+        if (is_na) {
+          outp[i] = NA_CPLX;
+        } else {
+          outp[i].r = rsum;
+          outp[i].i = isum;
+        }
+      }
+    } break;
+    default:
+      error(_("Internal error: should have caught non-INTSXP/REALSXP input by now")); // # nocov
     }
   }
 

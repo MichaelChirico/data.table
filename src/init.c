@@ -123,6 +123,7 @@ SEXP psum();
 SEXP pprod();
 SEXP pany();
 SEXP pall();
+SEXP ptest();
 
 // .Externals
 SEXP fastmean();
@@ -219,6 +220,7 @@ R_CallMethodDef callMethods[] = {
 {"Cpprod", (DL_FUNC) &pprod, -1},
 {"Cpany", (DL_FUNC) &pany, -1},
 {"Cpall", (DL_FUNC) &pall, -1},
+{"Cptest", (DL_FUNC) &ptest, -1},
 {NULL, NULL, 0}
 };
 
